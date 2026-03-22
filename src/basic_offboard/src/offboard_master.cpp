@@ -12,13 +12,12 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
-#include <std_msgs/msg/u_int8.hpp>
+#include "custom_interfaces/srv/req_mode.hpp"
 
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
 
 // All position/velocity setpoints are expected in NED frame (North-East-Down).
-// PX4 TrajectorySetpoint uses NED: x=North, y=East, z=Down (negative = up).
 // External nodes should publish coordinates in NED.
 //
 // VTOL mode values for ext_mode_sub_ (std_msgs::msg::UInt8):
@@ -66,20 +65,21 @@ public:
 
     // External command subscriptions
     ext_land_sub_ = create_subscription<std_msgs::msg::Bool>(
-      "offboard/cmd_land", 10,
+      "/offboard/cmd/land", 10,
       std::bind(&OffboardMaster::ext_land_callback, this, std::placeholders::_1));
 
     ext_pos_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-      "offboard/setpoint_position", 10,
+      "/offboard/setpoint/position", 10,
       std::bind(&OffboardMaster::ext_pos_callback, this, std::placeholders::_1));
 
     ext_vel_sub_ = create_subscription<geometry_msgs::msg::TwistStamped>(
-      "offboard/setpoint_velocity", 10,
+      "/offboard/setpoint/velocity", 10,
       std::bind(&OffboardMaster::ext_vel_callback, this, std::placeholders::_1));
 
-    ext_mode_sub_ = create_subscription<std_msgs::msg::UInt8>(
-      "offboard/cmd_mode", 10,
-      std::bind(&OffboardMaster::ext_mode_callback, this, std::placeholders::_1));
+    mode_srv_ = create_service<custom_interfaces::srv::ReqMode>(
+      "/offboard/srv/req_mode",
+      std::bind(&OffboardMaster::handle_req_mode, this,
+                std::placeholders::_1, std::placeholders::_2));
 
     timer_ = create_wall_timer(100ms, std::bind(&OffboardMaster::timer_callback, this));
 
@@ -101,7 +101,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr                ext_land_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr    ext_pos_sub_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr   ext_vel_sub_;
-  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr               ext_mode_sub_;
+  rclcpp::Service<custom_interfaces::srv::ReqMode>::SharedPtr         mode_srv_;
 
   rclcpp::TimerBase::SharedPtr timer_;
 
@@ -423,43 +423,56 @@ private:
     vel_sp_.last_received = now();
   }
 
-  void ext_mode_callback(const std_msgs::msg::UInt8::SharedPtr msg)
+  void handle_req_mode(
+    const custom_interfaces::srv::ReqMode::Request::SharedPtr  req,
+    custom_interfaces::srv::ReqMode::Response::SharedPtr       res)
   {
+    using Req = custom_interfaces::srv::ReqMode::Request;
+    using Res = custom_interfaces::srv::ReqMode::Response;
+
     if (!vehicle_status_.is_vtol) {
-      RCLCPP_WARN(get_logger(), "Mode change rejected: vehicle is not VTOL");
+      res->result  = Res::RESULT_REJECTED;
+      res->message = "Vehicle is not VTOL";
       return;
     }
 
-    // 1 = request FW mode
-    if (msg->data == 1) {
-      if (state_ == State::MC_HOVER) {
-        if (!is_airspeed_sufficient()) {
+    if (req->mode == Req::MODE_FW) {
+      if (state_ == State::FW_HOVER || state_ == State::FW_CRUISE) {
+        res->result = Res::RESULT_OK;
+      } else if (state_ == State::MC_HOVER && is_airspeed_sufficient()) {
+        request_vtol_transition(true);
+        set_state(State::FW_HOVER);
+        res->result = Res::RESULT_OK;
+      } else {
+        if (state_ == State::MC_HOVER) {
           RCLCPP_WARN(get_logger(),
             "FW transition rejected: CAS %.1f m/s below minimum %.1f m/s",
             static_cast<double>(airspeed_validated_.calibrated_airspeed_m_s),
             get_parameter("min_transition_airspeed_m_s").as_double());
-          return;
+        } else {
+          RCLCPP_WARN(get_logger(), "FW transition not allowed in state %s", state_to_str(state_));
         }
-        request_vtol_transition(true);
-        set_state(State::FW_HOVER);
-      } else {
-        RCLCPP_WARN(get_logger(), "FW transition rejected in state %s", state_to_str(state_));
+        res->result = Res::RESULT_REJECTED;
       }
       return;
     }
 
-    // 0 = request MC mode
-    if (msg->data == 0) {
-      if (state_ == State::FW_CRUISE) {
+    if (req->mode == Req::MODE_MC) {
+      if (state_ == State::MC_HOVER) {
+        res->result = Res::RESULT_OK;
+      } else if (state_ == State::FW_CRUISE) {
         request_vtol_transition(false);
         set_state(State::FW_HOVER);
+        res->result = Res::RESULT_OK;
       } else {
-        RCLCPP_WARN(get_logger(), "MC transition rejected in state %s", state_to_str(state_));
+        RCLCPP_WARN(get_logger(), "MC transition not allowed in state %s", state_to_str(state_));
+        res->result = Res::RESULT_REJECTED;
       }
       return;
     }
 
-    RCLCPP_WARN(get_logger(), "Unknown mode value: %u", msg->data);
+    res->result = Res::RESULT_REJECTED;
+    RCLCPP_WARN(get_logger(), "Unknown mode value: %u", req->mode);
   }
 };
 
