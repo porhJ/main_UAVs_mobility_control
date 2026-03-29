@@ -27,9 +27,18 @@ ament_target_dependencies(mission_node
   rclcpp
   px4_msgs
   geometry_msgs
+  std_msgs
   custom_interfaces
 )
 install(TARGETS mission_node DESTINATION lib/${PROJECT_NAME})
+
+add_executable(waypoint_test_node src/waypoint_test_node.cpp)
+ament_target_dependencies(waypoint_test_node
+  rclcpp
+  geometry_msgs
+  custom_interfaces
+)
+install(TARGETS waypoint_test_node DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 

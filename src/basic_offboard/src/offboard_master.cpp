@@ -9,6 +9,7 @@
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -52,16 +53,17 @@ public:
 
     // PX4 state subscriptions
     vehicle_status_sub_ = create_subscription<VehicleStatus>(
-      "/fmu/out/vehicle_status", px4_qos,
-      [this](VehicleStatus::UniquePtr msg) { vehicle_status_ = *msg; });
+      "/fmu/out/vehicle_status", rclcpp::SensorDataQoS(),
+      std::bind(&OffboardMaster::vehicle_status_callback, this, std::placeholders::_1));
 
-    vehicle_local_position_sub_ = create_subscription<VehicleLocalPosition>(
-      "/fmu/out/vehicle_local_position", px4_qos,
-      [this](VehicleLocalPosition::UniquePtr msg) { vehicle_local_position_ = *msg; });
+    vehicle_local_position_sub_ = this->create_subscription<VehicleOdometry>(
+      "/fmu/out/vehicle_odometry", rclcpp::SensorDataQoS(),
+      std::bind(&OffboardMaster::vehicle_odom_callback, this, std::placeholders::_1)
+    );
 
     airspeed_validated_sub_ = create_subscription<AirspeedValidated>(
-      "/fmu/out/airspeed_validated", px4_qos,
-      [this](AirspeedValidated::UniquePtr msg) { airspeed_validated_ = *msg; });
+      "/fmu/out/airspeed_validated", rclcpp::SensorDataQoS(),
+      std::bind(&OffboardMaster::airspeed_callback, this, std::placeholders::_1));
 
     // External command subscriptions
     ext_land_sub_ = create_subscription<std_msgs::msg::Bool>(
@@ -94,7 +96,7 @@ private:
 
   // PX4 state subscriptions
   rclcpp::Subscription<VehicleStatus>::SharedPtr           vehicle_status_sub_;
-  rclcpp::Subscription<VehicleLocalPosition>::SharedPtr    vehicle_local_position_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr    vehicle_local_position_sub_;
   rclcpp::Subscription<AirspeedValidated>::SharedPtr       airspeed_validated_sub_;
 
   // External command subscriptions
@@ -108,7 +110,7 @@ private:
   // State
   State state_{State::LANDED};
   VehicleStatus vehicle_status_{};
-  VehicleLocalPosition vehicle_local_position_{};
+  float vehicle_local_position_[3];
   AirspeedValidated airspeed_validated_{};
 
   // Latest position setpoint (NED frame)
@@ -186,10 +188,10 @@ private:
   {
     switch (state_) {
       case State::TAKEOFF:
-        if (takeoff_reached()) {
-          hover_x_   = vehicle_local_position_.x;
-          hover_y_   = vehicle_local_position_.y;
-          hover_z_   = vehicle_local_position_.z;
+        if (vehicle_local_position_[2] <= (TAKEOFF_HEIGHT_NED + TAKEOFF_THRESHOLD)) {
+          hover_x_   = vehicle_local_position_[0];
+          hover_y_   = vehicle_local_position_[1];
+          hover_z_   = vehicle_local_position_[2];
           set_state(State::MC_HOVER);
         }
         break;
@@ -251,9 +253,9 @@ private:
       msg.timestamp = now().nanoseconds() / 1000;
       traj_pub_->publish(msg);
       // Track position so hover hold is current when velocity expires
-      hover_x_   = vehicle_local_position_.x;
-      hover_y_   = vehicle_local_position_.y;
-      hover_z_   = vehicle_local_position_.z;
+      hover_x_   = vehicle_local_position_[0];
+      hover_y_   = vehicle_local_position_[1];
+      hover_z_   = vehicle_local_position_[2];
     } else if (pos_sp_.valid) {
       TrajectorySetpoint msg{};
       msg.position  = {pos_sp_.x, pos_sp_.y, pos_sp_.z};
@@ -319,7 +321,7 @@ private:
 
   bool takeoff_reached() const
   {
-    return vehicle_local_position_.z <= (TAKEOFF_HEIGHT_NED + TAKEOFF_THRESHOLD);
+    return vehicle_local_position_[2] <= (TAKEOFF_HEIGHT_NED + TAKEOFF_THRESHOLD);
   }
 
   bool is_vel_sp_active() const
@@ -358,7 +360,25 @@ private:
     }
   }
 
-  // ----- External command callbacks -----
+  // ----- External command callbacks ----
+
+  void vehicle_odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
+  {
+    // PX4 NED coordinates: z is negative when above ground.
+    vehicle_local_position_[0] = msg->position[0];
+    vehicle_local_position_[1] = msg->position[1];
+    vehicle_local_position_[2] = msg->position[2];
+  }
+
+  void vehicle_status_callback(const VehicleStatus::SharedPtr msg)
+  {
+    vehicle_status_ = *msg;
+  }
+
+  void airspeed_callback(const AirspeedValidated::SharedPtr msg)
+  {
+    airspeed_validated_ = *msg;
+  }
 
   void ext_land_callback(const std_msgs::msg::Bool::SharedPtr msg)
   {
@@ -432,7 +452,6 @@ private:
 
     if (!vehicle_status_.is_vtol) {
       res->result  = Res::RESULT_REJECTED;
-      res->message = "Vehicle is not VTOL";
       return;
     }
 

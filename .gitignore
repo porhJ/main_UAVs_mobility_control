@@ -5,3 +5,4 @@ build/
 install/
 log/
 CLAUDE.md
+src/basic_offboard/src/waypoint_test_node.cpp

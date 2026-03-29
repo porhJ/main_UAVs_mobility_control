@@ -5,6 +5,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include "custom_interfaces/msg/waypoints.hpp"
@@ -33,9 +34,13 @@ public:
     px4_qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
     px4_qos.history(rclcpp::HistoryPolicy::KeepLast);
 
-    // Publisher
+    // Publishers
     pos_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
       "/offboard/setpoint/position", 10);
+
+    rclcpp::QoS state_qos(1);
+    state_qos.transient_local().reliable();
+    mission_state_pub_ = create_publisher<std_msgs::msg::UInt8>("/mission_state", state_qos);
 
     // PX4 state subscriptions
     odometry_sub_ = create_subscription<VehicleOdometry>(
@@ -51,16 +56,19 @@ public:
       [this](VehicleStatus::UniquePtr msg) { vehicle_status_ = *msg; });
 
     // Waypoint subscriptions
+    rclcpp::QoS wp_qos(1);
+    wp_qos.transient_local().reliable();
+
     endu_wp_sub_ = create_subscription<custom_interfaces::msg::Waypoints>(
-      "/waypoints/endu", 10,
+      "/waypoints/endu", wp_qos,
       std::bind(&MissionNode::endu_wp_callback, this, std::placeholders::_1));
 
     map_wp_sub_ = create_subscription<custom_interfaces::msg::Waypoints>(
-      "/waypoints/map", 10,
+      "/waypoints/map", wp_qos,
       std::bind(&MissionNode::map_wp_callback, this, std::placeholders::_1));
 
     drop_area_sub_ = create_subscription<custom_interfaces::msg::Waypoints>(
-      "/drop_area", 10,
+      "/drop_area", wp_qos,
       std::bind(&MissionNode::drop_area_callback, this, std::placeholders::_1));
 
     // Service client for mode requests
@@ -112,6 +120,7 @@ private:
   rclcpp::Subscription<Waypoints>::SharedPtr                    drop_area_sub_;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pos_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr            mission_state_pub_;
   rclcpp::Client<ReqMode>::SharedPtr                            req_mode_client_;
   rclcpp::TimerBase::SharedPtr                                  timer_;
 
@@ -138,7 +147,7 @@ private:
 
     if (mission_ == Mission::MAPPING && !drop_pending_) {
       drop_pending_ = true;
-      RCLCPP_INFO(get_logger(), "Drop area detected — will divert after current waypoint");
+      RCLCPP_INFO(get_logger(), "Drop area received — will divert after current waypoint");
     }
   }
 
@@ -146,6 +155,8 @@ private:
 
   void request_mode(uint8_t mode)
   {
+    if (!vehicle_status_.is_vtol) return;  // mode switching only relevant for VTOL
+
     if (!req_mode_client_->service_is_ready()) {
       RCLCPP_WARN(get_logger(), "req_mode service not ready, skipping mode request");
       return;
@@ -187,6 +198,7 @@ private:
     }
 
     publish_waypoint(endu_waypoints_[endu_idx_]);
+    request_mode(ReqMode::Request::MODE_FW);
 
     const float radius = is_fw_mode() ? FW_RADIUS : MC_RADIUS;
     if (distance_to(endu_waypoints_[endu_idx_]) > radius) return;
@@ -259,6 +271,10 @@ private:
     RCLCPP_INFO(get_logger(), "Mission: %s -> %s",
       mission_to_str(mission_), mission_to_str(next));
     mission_ = next;
+
+    std_msgs::msg::UInt8 state_msg;
+    state_msg.data = static_cast<uint8_t>(next);
+    mission_state_pub_->publish(state_msg);
 
     switch (next) {
       case Mission::ENDURANCE:
