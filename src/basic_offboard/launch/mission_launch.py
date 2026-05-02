@@ -1,3 +1,5 @@
+import os
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -5,6 +7,9 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    lqr_params = os.path.join(
+        get_package_share_directory('basic_offboard'), 'config', 'lqr_gains.yaml')
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'desired_laps',
@@ -17,6 +22,7 @@ def generate_launch_description():
             executable='offboard_master',
             name='offboard_master',
             output='screen',
+            parameters=[lqr_params],
         ),
 
         Node(

@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <chrono>
 #include <functional>
@@ -50,6 +52,19 @@ public:
     traj_pub_     = create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", px4_qos);
 
     declare_parameter("min_transition_airspeed_m_s", 10.0);
+
+    declare_parameter("use_lqr", false);
+    declare_parameter("lqr_vel_limit", 5.0);
+    declare_parameter("lqr_K", std::vector<double>(9, 0.0));
+
+    use_lqr_       = get_parameter("use_lqr").as_bool();
+    lqr_vel_limit_ = static_cast<float>(get_parameter("lqr_vel_limit").as_double());
+    auto K_vec = get_parameter("lqr_K").as_double_array();
+    for (size_t i = 0; i < 9 && i < K_vec.size(); ++i)
+      lqr_K_[i] = static_cast<float>(K_vec[i]);
+
+    if (use_lqr_)
+      RCLCPP_INFO(get_logger(), "LQR mode enabled. vel_limit=%.2f m/s", lqr_vel_limit_);
 
     // PX4 state subscriptions
     vehicle_status_sub_ = create_subscription<VehicleStatus>(
@@ -132,7 +147,12 @@ private:
   float hover_z_{TAKEOFF_HEIGHT_NED};
   float hover_yaw_{0.0f};
 
-  static constexpr float TAKEOFF_HEIGHT_NED  = -5.0f; 
+  // LQR
+  bool use_lqr_{false};
+  float lqr_vel_limit_{5.0f};
+  std::array<float, 9> lqr_K_{};  // row-major 3x3: K[i*3+j]
+
+  static constexpr float TAKEOFF_HEIGHT_NED  = -5.0f;
   static constexpr float TAKEOFF_THRESHOLD   =  0.3f;  // metres tolerance
   static constexpr double VEL_SP_TIMEOUT_S   =  0.5;   // velocity setpoint expiry
   static constexpr int   OFFBOARD_SETTLE_COUNT = 10;   // heartbeats before arming
@@ -145,7 +165,7 @@ private:
   {
     update_state();
 
-    const bool use_velocity = is_vel_sp_active();
+    const bool use_velocity = is_vel_sp_active() || (use_lqr_ && pos_sp_.valid);
     publish_offboard_heartbeat(use_velocity);
 
     // Phase 1: accumulate heartbeats before switching to offboard mode
@@ -245,6 +265,29 @@ private:
 
   void publish_active_setpoint()
   {
+    if (use_lqr_ && pos_sp_.valid) {
+      float e[3] = {
+        vehicle_local_position_[0] - pos_sp_.x,
+        vehicle_local_position_[1] - pos_sp_.y,
+        vehicle_local_position_[2] - pos_sp_.z
+      };
+      float u[3] = {0.0f, 0.0f, 0.0f};
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+          u[i] -= lqr_K_[i * 3 + j] * e[j];
+      for (auto & vi : u)
+        vi = std::clamp(vi, -lqr_vel_limit_, lqr_vel_limit_);
+      TrajectorySetpoint msg{};
+      msg.position  = {NAN, NAN, NAN};
+      msg.velocity  = {u[0], u[1], u[2]};
+      msg.timestamp = now().nanoseconds() / 1000;
+      traj_pub_->publish(msg);
+      hover_x_ = vehicle_local_position_[0];
+      hover_y_ = vehicle_local_position_[1];
+      hover_z_ = vehicle_local_position_[2];
+      return;
+    }
+
     if (is_vel_sp_active()) {
       TrajectorySetpoint msg{};
       msg.position  = {NAN, NAN, NAN};
