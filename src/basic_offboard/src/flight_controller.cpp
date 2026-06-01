@@ -4,7 +4,7 @@ namespace basic_offboard {
 
 void FlightController::on_pos_setpoint(PosNED p, float yaw)
 {
-  if (state_ != State::HOVER) return;       // ignore in non-HOVER states
+  if (state_ != State::HOVER) return;    
   pos_sp_       = p;
   pos_sp_yaw_   = yaw;
   pos_sp_valid_ = true;
@@ -40,7 +40,8 @@ FlightController::Tick FlightController::tick(double now_s)
   Tick out;
   out.heartbeat_use_velocity = is_vel_sp_active(now_s);
 
-  // Phase 1: accumulate 10 heartbeats + hover setpoints before arming.
+  // Phase 1
+  // requirement before arm/takeoff is to publish a few setpoints so PX4 considers the offboard stream valid.
   if (settle_counter_ < SETTLE_TICKS) {
     settle_counter_++;
     out.publish_setpoint = true;
