@@ -8,6 +8,7 @@
 
 #include "basic_offboard/mission_planner.hpp"
 #include "custom_interfaces/msg/waypoints.hpp"
+#include "custom_interfaces/msg/offboard_status.hpp"
 
 // Thin ROS shell. All mission logic lives in basic_offboard::MissionPlanner.
 
@@ -64,6 +65,15 @@ public:
         RCLCPP_INFO(get_logger(), "Drop area received");
       });
 
+    // Gate the mission on offboard_master's state: only run while it is in a
+    // state that honors our setpoints (HOVER). Avoids advancing the mission or
+    // publishing waypoints that would be silently dropped during takeoff/landing.
+    offboard_state_sub_ = create_subscription<custom_interfaces::msg::OffboardStatus>(
+      "/offboard/state", latched,
+      [this](custom_interfaces::msg::OffboardStatus::SharedPtr msg) {
+        accepting_setpoints_ = msg->accepting_setpoints;
+      });
+
     timer_ = create_wall_timer(100ms, [this]() { on_timer(); });
 
     RCLCPP_INFO(get_logger(), "MissionNode started. Desired laps: %d",
@@ -80,7 +90,10 @@ private:
   rclcpp::Subscription<custom_interfaces::msg::Waypoints>::SharedPtr endu_sub_;
   rclcpp::Subscription<custom_interfaces::msg::Waypoints>::SharedPtr map_sub_;
   rclcpp::Subscription<custom_interfaces::msg::Waypoints>::SharedPtr drop_sub_;
+  rclcpp::Subscription<custom_interfaces::msg::OffboardStatus>::SharedPtr offboard_state_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
+
+  bool accepting_setpoints_{false};
 
   static MissionPlanner::Waypoint pose_to_wp(const geometry_msgs::msg::PoseStamped & p)
   {
@@ -129,6 +142,9 @@ private:
 
   void on_timer()
   {
+    // Pause the mission until offboard_master is flying and accepting setpoints.
+    if (!accepting_setpoints_) return;
+
     const auto t = planner_.tick();
 
     if (t.has_setpoint) publish_waypoint(t.setpoint);

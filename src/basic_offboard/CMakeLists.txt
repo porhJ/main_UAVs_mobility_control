@@ -25,7 +25,7 @@ target_include_directories(mission_planner PUBLIC include)
 # --- ROS nodes ---
 
 add_executable(offboard_master src/offboard_master.cpp)
-ament_target_dependencies(offboard_master rclcpp px4_msgs geometry_msgs std_msgs)
+ament_target_dependencies(offboard_master rclcpp px4_msgs geometry_msgs std_msgs custom_interfaces)
 target_link_libraries(offboard_master flight_controller)
 install(TARGETS offboard_master DESTINATION lib/${PROJECT_NAME})
 
