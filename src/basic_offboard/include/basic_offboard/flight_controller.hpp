@@ -19,8 +19,38 @@ class FlightController {
 public:
   enum class State { TAKEOFF, HOVER, LANDING, LANDED };
 
+  // Mirrors custom_interfaces/msg/OffboardStatus geofence constants.
+  enum GeofenceStatus : uint8_t { GEOFENCE_OK = 0, GEOFENCE_WARN = 1, GEOFENCE_BREACH = 2 };
+
   struct PosNED { float x{0.0f}, y{0.0f}, z{0.0f}; };
   struct VelNED { float vx{0.0f}, vy{0.0f}, vz{0.0f}, yawspeed{0.0f}; };
+
+  // Tunables (exposed for tests)
+  static constexpr float  TAKEOFF_Z_NED    = -5.0f;
+  static constexpr float  TAKEOFF_TOL_M    =  0.3f;
+  static constexpr double VEL_SP_TIMEOUT_S =  0.5;
+  static constexpr int    SETTLE_TICKS     = 10;
+  static constexpr uint8_t NAV_STATE_OFFBOARD = 14;
+  static constexpr int ARM_CMD_TOL = 100;
+
+  // Runtime configuration (injected by the shell from ROS params).
+  // Geofence is an axis-aligned box in PX4 local NED (z Down, negative = up).
+  // Library default leaves the fence OFF so the core's default behaviour is
+  // unconstrained; offboard_master enables it via the `fence.*` params.
+  struct Config {
+    bool  fence_enabled   = false;
+    float fence_x_min     = -1.0f;
+    float fence_x_max     = 12.0f;
+    float fence_y_min     = -3.5f;
+    float fence_y_max     =  3.5f;
+    float fence_z_ceiling = -3.0f;   // most-negative z allowed (altitude cap)
+    float fence_z_floor   = -0.2f;   // least-negative z allowed (never into the ground)
+    float fence_margin    =  0.5f;   // hard-breach distance beyond the soft fence
+    float takeoff_z       = TAKEOFF_Z_NED;  // takeoff target (should be >= fence_z_ceiling)
+  };
+
+  FlightController() = default;   // default Config: fence off, takeoff_z = TAKEOFF_Z_NED
+  explicit FlightController(Config cfg) : cfg_(cfg) { hover_.z = cfg_.takeoff_z; }
 
   struct Tick {
     enum class SP { POSITION, VELOCITY };
@@ -48,22 +78,21 @@ public:
   Tick tick(double now_s);
 
   // --- Queries ---
-  State state() const                           { return state_; }
+  State   state() const                         { return state_; }
+  // True when the current state honors external position/velocity setpoints.
+  bool    accepts_setpoints() const             { return state_ == State::HOVER; }
+  // Geofence verdict from the most recent tick(): OK / WARN / BREACH.
+  uint8_t geofence_status() const               { return geofence_status_; }
+  PosNED  local_position() const                { return local_pos_; }
   static const char * state_str(State s);
 
-  // Tunables (exposed for tests)
-  static constexpr float  TAKEOFF_Z_NED    = -5.0f;
-  static constexpr float  TAKEOFF_TOL_M    =  0.3f;
-  static constexpr double VEL_SP_TIMEOUT_S =  0.5;
-  static constexpr int    SETTLE_TICKS     = 10;
-  static constexpr uint8_t NAV_STATE_OFFBOARD = 14;
-  static constexpr int ARM_CMD_TOL = 100;
-
 private:
+  Config cfg_{};
+
   State  state_{State::LANDED};
 
   PosNED local_pos_{};
-  bool   disarmed_{true}; 
+  bool   disarmed_{true};
   uint8_t   nav_state_{0}; // 0 is manual mode
   PosNED pos_sp_{};
   float  pos_sp_yaw_{0.0f};
@@ -85,9 +114,18 @@ private:
 
   bool land_requested_{false};
 
+  // Geofence verdict, re-derived every tick().
+  uint8_t geofence_status_{GEOFENCE_OK};
+
   bool set_state(State s);             // returns true if state changed
   bool is_vel_sp_active(double now_s) const;
   bool takeoff_reached() const;
+
+  // Geofence (NED). clamp_* may raise geofence_status_ to WARN.
+  bool   airborne() const;                 // state is TAKEOFF or HOVER
+  bool   hard_breach(PosNED p) const;      // vehicle outside the box + margin
+  PosNED clamp_to_fence(PosNED p);         // soft-clamp a position setpoint
+  VelNED clamp_velocity(VelNED v);         // zero outward components near a wall
 };
 
 }  // namespace basic_offboard

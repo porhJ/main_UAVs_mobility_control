@@ -1,6 +1,12 @@
 #include "basic_offboard/flight_controller.hpp"
 
+#include <algorithm>
+
 namespace basic_offboard {
+
+namespace {
+float clampf(float v, float lo, float hi) { return std::max(lo, std::min(v, hi)); }
+}  // namespace
 
 void FlightController::on_pos_setpoint(PosNED p, float yaw)
 {
@@ -25,7 +31,7 @@ bool FlightController::is_vel_sp_active(double now_s) const
 
 bool FlightController::takeoff_reached() const
 {
-  return local_pos_.z <= (TAKEOFF_Z_NED + TAKEOFF_TOL_M);
+  return local_pos_.z <= (cfg_.takeoff_z + TAKEOFF_TOL_M);
 }
 
 bool FlightController::set_state(State s)
@@ -35,10 +41,53 @@ bool FlightController::set_state(State s)
   return true;
 }
 
+bool FlightController::airborne() const
+{
+  return state_ == State::TAKEOFF || state_ == State::HOVER;
+}
+
+bool FlightController::hard_breach(PosNED p) const
+{
+  if (!cfg_.fence_enabled) return false;
+  const float m = cfg_.fence_margin;
+  return p.x < cfg_.fence_x_min - m || p.x > cfg_.fence_x_max + m ||
+         p.y < cfg_.fence_y_min - m || p.y > cfg_.fence_y_max + m ||
+         p.z < cfg_.fence_z_ceiling - m || p.z > cfg_.fence_z_floor + m;
+}
+
+FlightController::PosNED FlightController::clamp_to_fence(PosNED p)
+{
+  PosNED c = p;
+  c.x = clampf(c.x, cfg_.fence_x_min, cfg_.fence_x_max);
+  c.y = clampf(c.y, cfg_.fence_y_min, cfg_.fence_y_max);
+  c.z = clampf(c.z, cfg_.fence_z_ceiling, cfg_.fence_z_floor);
+  if (c.x != p.x || c.y != p.y || c.z != p.z) {
+    geofence_status_ = std::max<uint8_t>(geofence_status_, GEOFENCE_WARN);
+  }
+  return c;
+}
+
+FlightController::VelNED FlightController::clamp_velocity(VelNED v)
+{
+  const float m = cfg_.fence_margin;
+  bool clamped = false;
+  // Zero a velocity component that would push the vehicle past a wall it is near.
+  if (local_pos_.x >= cfg_.fence_x_max - m && v.vx > 0.0f) { v.vx = 0.0f; clamped = true; }
+  if (local_pos_.x <= cfg_.fence_x_min + m && v.vx < 0.0f) { v.vx = 0.0f; clamped = true; }
+  if (local_pos_.y >= cfg_.fence_y_max - m && v.vy > 0.0f) { v.vy = 0.0f; clamped = true; }
+  if (local_pos_.y <= cfg_.fence_y_min + m && v.vy < 0.0f) { v.vy = 0.0f; clamped = true; }
+  // NED z: vz < 0 climbs toward the ceiling, vz > 0 descends toward the floor.
+  if (local_pos_.z <= cfg_.fence_z_ceiling + m && v.vz < 0.0f) { v.vz = 0.0f; clamped = true; }
+  if (local_pos_.z >= cfg_.fence_z_floor - m && v.vz > 0.0f) { v.vz = 0.0f; clamped = true; }
+  if (clamped) geofence_status_ = std::max<uint8_t>(geofence_status_, GEOFENCE_WARN);
+  return v;
+}
+
 FlightController::Tick FlightController::tick(double now_s)
 {
   Tick out;
   out.heartbeat_use_velocity = is_vel_sp_active(now_s);
+  geofence_status_ = GEOFENCE_OK;   // re-derived each tick
 
   // Phase 1
   // requirement before arm/takeoff is to publish a few setpoints so PX4 considers the offboard stream valid.
@@ -73,6 +122,16 @@ FlightController::Tick FlightController::tick(double now_s)
     }
   }
 
+  // Hard geofence: if the vehicle leaves the box (+ margin) while airborne,
+  // abort to an autonomous landing.
+  if (airborne() && hard_breach(local_pos_)) {
+    geofence_status_ = GEOFENCE_BREACH;
+    if (state_ != State::LANDING) {
+      out.send_land     = true;
+      out.state_changed = set_state(State::LANDING) || out.state_changed;
+    }
+  }
+
   // State transitions driven by vehicle telemetry.
   switch (state_) {
     case State::TAKEOFF:
@@ -95,7 +154,7 @@ FlightController::Tick FlightController::tick(double now_s)
     case State::TAKEOFF:
       out.publish_setpoint = true;
       out.setpoint_kind    = Tick::SP::POSITION;
-      out.position         = PosNED{hover_.x, hover_.y, TAKEOFF_Z_NED};
+      out.position         = PosNED{hover_.x, hover_.y, cfg_.takeoff_z};
       out.yaw              = hover_yaw_;
       break;
 
@@ -125,6 +184,15 @@ FlightController::Tick FlightController::tick(double now_s)
       // We keep publishing the heartbeat but skip the trajectory setpoint.
       out.publish_setpoint = false;
       break;
+  }
+
+  // Soft geofence: keep the published setpoint inside the box (raises WARN).
+  if (cfg_.fence_enabled && out.publish_setpoint) {
+    if (out.setpoint_kind == Tick::SP::POSITION) {
+      out.position = clamp_to_fence(out.position);
+    } else {
+      out.velocity = clamp_velocity(out.velocity);
+    }
   }
 
   return out;
