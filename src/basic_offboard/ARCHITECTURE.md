@@ -16,7 +16,11 @@ autopilot over the uXRCE-DDS bridge. It:
 1. Maintains the PX4 offboard-mode heartbeat (`OffboardControlMode` at 10 Hz).
 2. Runs a flight state machine: `TAKEOFF → HOVER → LANDING → LANDED`.
 3. Accepts external setpoints (position, velocity, land command).
-4. Optionally runs a mission state machine (`ENDURANCE → MAPPING ↔ DROPPING`)
+4. Enforces a **geofence**: clamps setpoints to a configured NED box and lands
+   the drone if it strays beyond the box.
+5. Publishes its own state on **`/offboard/state`** so external requesters know
+   when it is flying, whether their setpoints are honored, and the geofence verdict.
+6. Optionally runs a mission state machine (`ENDURANCE → MAPPING ↔ DROPPING`)
    that publishes waypoints to itself.
 
 Target vehicle: **multicopter only**. There is no FW or VTOL code path.
@@ -140,6 +144,20 @@ Returns a struct describing what the shell should publish *this tick*:
 | `position`, `yaw` | Position-mode payload |
 | `velocity` | Velocity-mode payload |
 | `send_arm`, `send_offboard_mode`, `send_land` | One-shot `VehicleCommand`s |
+| `state_changed` | True on the tick where the state machine moved (drives the `/offboard/state` edge-publish) |
+
+**Queries** (read by the shell after `tick()`, e.g. to fill `/offboard/state`):
+
+| Query | Meaning |
+|---|---|
+| `state()` | Current `State` |
+| `accepts_setpoints()` | True when external setpoints are honored (i.e. in `HOVER`) |
+| `geofence_status()` | Verdict from the last tick: `GEOFENCE_OK` / `WARN` / `BREACH` |
+| `local_position()` | Last known NED position |
+
+**Configuration**: an optional `FlightController::Config` (passed to the
+constructor) holds the geofence box, `takeoff_z`, and toggles the fence on/off.
+The library default leaves the fence **off**; the shell turns it on via params.
 
 **Why a tick-result struct instead of callbacks back into the shell?**
 Because it keeps the dependency one-way (shell → controller → return value).
@@ -212,12 +230,28 @@ PX4 requires that offboard messages already be streaming when you send the
 mode-switch command, or it rejects the switch. The controller publishes
 heartbeats and hover setpoints for 10 ticks (1 s at 10 Hz) before sending
 `VEHICLE_CMD_DO_SET_MODE` and `VEHICLE_CMD_COMPONENT_ARM_DISARM`. After
-that, it transitions to `TAKEOFF`. The arm and mode-switch are one-shots:
-even if the timer fires a million more times, they are issued exactly once.
+that, it transitions to `TAKEOFF`. Arm and mode-switch are then **re-sent
+every tick until** PX4 actually reports armed *and* in offboard (capped at
+`ARM_CMD_TOL` ticks), because a single command often does not take.
 
 **Why a counter and not a wall-clock check?** Because the timer can drift,
 miss ticks under load, or fire late after boot. A counter is invariant to
 all of that — 10 successful ticks is 10 successful heartbeats, period.
+
+#### Geofence (`Config`)
+
+When `Config::fence_enabled` is set, the controller enforces an axis-aligned
+box in NED, in two levels, and reports the result through `geofence_status()`:
+
+| Level | Trigger | Action | Status |
+|---|---|---|---|
+| **Soft** | a *setpoint* leaves the box | clamp it back inside (position) or zero the outward component (velocity) | `WARN` |
+| **Hard** | the *vehicle* leaves the box + `fence_margin` while airborne | force `send_land` + `LANDING` | `BREACH` |
+
+The status is re-derived every tick (reset to `OK`, raised to `WARN`/`BREACH`
+as needed). The box, margin, ceiling/floor and `takeoff_z` all come from
+`Config`. The altitude ceiling (`fence_z_ceiling`) is how the indoor 3 m cap is
+enforced — the takeoff target and every setpoint are clamped to it.
 
 ---
 
@@ -292,12 +326,20 @@ Wraps `FlightController`. Owns:
 - `/fmu/in/trajectory_setpoint` — pos/vel setpoint
 - `/fmu/in/vehicle_command` — arm/mode/land
 
+**Publisher** (state feedback): `/offboard/state` — `custom_interfaces/OffboardStatus`,
+latched, published on every state change plus a 2 Hz heartbeat. Lets requesters
+sequence against the controller's real state (flying? setpoints honored? geofence ok?).
+
 **Subscribers**:
-- `/fmu/out/vehicle_status` — extracts `disarmed` bool
+- `/fmu/out/vehicle_status` — extracts `disarmed` bool + `nav_state`
 - `/fmu/out/vehicle_odometry` — current NED position
 - `/offboard/cmd/land` — external land command (`std_msgs/Bool`)
 - `/offboard/setpoint/position` — external position SP (`PoseStamped`)
 - `/offboard/setpoint/velocity` — external velocity SP (`TwistStamped`)
+
+**Parameters**: `fence.enabled` (default `true`), `fence.{x_min,x_max,y_min,y_max,
+z_ceiling,z_floor,margin}`, and `takeoff_z` — read into a `FlightController::Config`
+at startup.
 
 **Timer**: 10 Hz. Calls `fc_.tick()` and publishes what the result says.
 
@@ -318,11 +360,16 @@ Wraps `MissionPlanner`. Owns:
 **Publisher**: `/mission_state` (latched, `UInt8`) — for external observers.
 
 **Subscribers** for `/fmu/out/vehicle_odometry`, `/waypoints/endu`,
-`/waypoints/map`, `/drop_area`.
+`/waypoints/map`, `/drop_area`, and **`/offboard/state`**.
 
 The shell converts `PoseStamped` to a flat `Waypoint{x,y,z,yaw}` struct on
 ingress and back to `PoseStamped` on egress. This is the entire reason the
 planner doesn't depend on geometry_msgs.
+
+**Mission gating**: `mission_node` pauses (does not tick or publish waypoints)
+until `/offboard/state` reports `accepting_setpoints == true`. This prevents it
+from advancing the mission or emitting waypoints during takeoff/landing, when
+`offboard_master` would silently drop them.
 
 **Why a latched mission-state topic?** So a node that subscribes *after*
 the mission has started still receives the current state. ROS QoS
@@ -347,9 +394,9 @@ All `/fmu/in/*` and `/fmu/out/*` topics use PX4's required QoS:
 BestEffort + TransientLocal + KeepLast(1)
 ```
 
-`/waypoints/*`, `/drop_area`, `/mission_state` use `TRANSIENT_LOCAL` so
-late subscribers (the mission node restarting mid-flight, e.g.) immediately
-receive the last message.
+`/waypoints/*`, `/drop_area`, `/mission_state`, `/offboard/state` use
+`TRANSIENT_LOCAL` so late subscribers (the mission node restarting mid-flight,
+e.g.) immediately receive the last message.
 
 External setpoint topics (`/offboard/setpoint/*`, `/offboard/cmd/land`) use
 default reliable QoS (`depth=10`). The reasoning: these come from human-ish
@@ -511,3 +558,7 @@ The tests can be reused by porting them to `pytest`.
 | Latched mission-state topic | Late subscribers see the current state |
 | NED throughout the package | Destination is NED; convert at the package boundary |
 | Log on state change only | At 10 Hz, steady-state logging is noise |
+| `/offboard/state` feedback topic | Requesters sequence on real state, not guesses; fixes setpoints dropped during takeoff |
+| Geofence in the pure core, config-injected | Safety stays unit-testable; bounds tune via params without recompiling |
+| Geofence soft-clamp vs hard-breach-land | Keep small excursions safe (clamp) but abort on real strays (land), per the rulebook |
+| Geofence off by default in the library | Core's default behaviour is unconstrained; the shell turns it on for real flights |
