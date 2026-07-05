@@ -11,6 +11,7 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <custom_interfaces/msg/offboard_status.hpp>
+#include <custom_interfaces/msg/mode_setpoint.hpp>
 
 #include "basic_offboard/flight_controller.hpp"
 
@@ -116,6 +117,28 @@ public:
           now_seconds());
       });
 
+    ext_mode_sub_ = create_subscription<custom_interfaces::msg::ModeSetpoint>(
+      "/offboard/setpoint/mode", 10,
+      [this](custom_interfaces::msg::ModeSetpoint::SharedPtr msg) {
+        fc_.on_mode(static_cast<uint8_t>(msg->mode));
+        // Feed exactly one setpoint kind, per the message's type field. Feeding
+        // both would let the velocity path clobber the position path in hover.
+        if (msg->type == custom_interfaces::msg::ModeSetpoint::TYPE_VELOCITY) {
+          fc_.on_vel_setpoint(
+            {static_cast<float>(msg->velocity.x),
+             static_cast<float>(msg->velocity.y),
+             static_cast<float>(msg->velocity.z),
+             static_cast<float>(msg->yawspeed)},
+            now_seconds());
+        } else {
+          fc_.on_pos_setpoint(
+            {static_cast<float>(msg->position.x),
+             static_cast<float>(msg->position.y),
+             static_cast<float>(msg->position.z)},
+            static_cast<float>(msg->yaw));
+        }
+      });
+
 
     // main loop timer
     timer_ = create_wall_timer(100ms, std::bind(&OffboardMaster::on_timer, this));
@@ -136,6 +159,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr             ext_land_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr ext_pos_sub_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr ext_vel_sub_;
+  rclcpp::Subscription<custom_interfaces::msg::ModeSetpoint>::SharedPtr ext_mode_sub_;
   rclcpp::TimerBase::SharedPtr                                     timer_;
 
   FlightController::State logged_state_{FlightController::State::LANDED};
@@ -166,6 +190,12 @@ private:
       publish_status();
     }
 
+    if (t.send_mode_transition) {
+      send_vtol_transition((fc_.state() == FlightController::State::CRUISE)
+                            ? FlightController::FlightMode::CRUISE
+                            : FlightController::FlightMode::HOVER);
+    }
+
     if (fc_.state() != logged_state_) {
       RCLCPP_INFO(get_logger(), "State: %s -> %s",
         FlightController::state_str(logged_state_),
@@ -182,6 +212,9 @@ private:
     msg.armed               = armed_;
     msg.offboard_active     = (nav_state_ == FlightController::NAV_STATE_OFFBOARD);
     msg.accepting_setpoints = fc_.accepts_setpoints();
+    msg.mode                = (fc_.state() == FlightController::State::CRUISE)
+                                ? custom_interfaces::msg::OffboardStatus::MODE_CRUISE
+                                : custom_interfaces::msg::OffboardStatus::MODE_HOVER;
     msg.geofence_status     = fc_.geofence_status();
     const auto p            = fc_.local_position();
     msg.position.x          = p.x;
@@ -229,6 +262,15 @@ private:
     cmd_pub_->publish(msg);
   }
 
+  void send_vtol_transition(FlightController::FlightMode target)
+  {
+    const float state = (target == FlightController::FlightMode::CRUISE)
+                          ? 4.0f    // VEHICLE_VTOL_STATE_FW
+                          : 3.0f;   // VEHICLE_VTOL_STATE_MC
+    send_vehicle_command(
+      px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_VTOL_TRANSITION,
+      state, /*param2 immediate=*/0.0f);
+  }
   void send_arm()
   {
     send_vehicle_command(px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0f);

@@ -17,7 +17,8 @@ namespace basic_offboard {
 
 class FlightController {
 public:
-  enum class State { TAKEOFF, HOVER, LANDING, LANDED };
+  enum class State { TAKEOFF, HOVER, CRUISE, LANDING, LANDED };
+  enum class FlightMode : uint8_t { HOVER=0, CRUISE=1 };
 
   // Mirrors custom_interfaces/msg/OffboardStatus geofence constants.
   enum GeofenceStatus : uint8_t { GEOFENCE_OK = 0, GEOFENCE_WARN = 1, GEOFENCE_BREACH = 2 };
@@ -60,6 +61,7 @@ public:
     PosNED position{};
     float  yaw{0.0f};
     VelNED velocity{};
+    bool send_mode_transition{false}; // true when change from hover -> cruise or vise versa (for vtol)
     bool   send_arm{false};
     bool   send_offboard_mode{false};
     bool   send_land{false};
@@ -73,6 +75,7 @@ public:
   void on_pos_setpoint(PosNED p, float yaw);
   void on_vel_setpoint(VelNED v, double now_s);
   void on_land_command()                        { land_requested_ = true; }
+  void on_mode(uint8_t m) { mode_ = m; }
 
   // --- Step ---
   Tick tick(double now_s);
@@ -80,7 +83,7 @@ public:
   // --- Queries ---
   State   state() const                         { return state_; }
   // True when the current state honors external position/velocity setpoints.
-  bool    accepts_setpoints() const             { return state_ == State::HOVER; }
+  bool    accepts_setpoints() const             { return state_ == State::HOVER || state_ == State::CRUISE; }
   // Geofence verdict from the most recent tick(): OK / WARN / BREACH.
   uint8_t geofence_status() const               { return geofence_status_; }
   PosNED  local_position() const                { return local_pos_; }
@@ -112,6 +115,9 @@ private:
   int  settle_counter_{0};
   int armed_sent_{0}; // counts ticks since arm command sent
 
+  uint8_t mode_{0};          // requested mode: 0 hover (MC), 1 cruise (FW) — mirrors FlightMode
+  uint8_t setpoint_type_{0}; // last accepted setpoint kind: 0 position, 1 velocity
+
   bool land_requested_{false};
 
   // Geofence verdict, re-derived every tick().
@@ -119,10 +125,11 @@ private:
 
   bool set_state(State s);             // returns true if state changed
   bool is_vel_sp_active(double now_s) const;
+  bool is_transitioning() const;       // requested mode differs from current airborne state
   bool takeoff_reached() const;
 
   // Geofence (NED). clamp_* may raise geofence_status_ to WARN.
-  bool   airborne() const;                 // state is TAKEOFF or HOVER
+  bool   airborne() const;                 // state is TAKEOFF, HOVER or CRUISE
   bool   hard_breach(PosNED p) const;      // vehicle outside the box + margin
   PosNED clamp_to_fence(PosNED p);         // soft-clamp a position setpoint
   VelNED clamp_velocity(VelNED v);         // zero outward components near a wall

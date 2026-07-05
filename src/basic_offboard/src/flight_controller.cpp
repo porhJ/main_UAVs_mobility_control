@@ -10,23 +10,33 @@ float clampf(float v, float lo, float hi) { return std::max(lo, std::min(v, hi))
 
 void FlightController::on_pos_setpoint(PosNED p, float yaw)
 {
-  if (state_ != State::HOVER) return;    
-  pos_sp_       = p;
-  pos_sp_yaw_   = yaw;
-  pos_sp_valid_ = true;
+  if (state_ != State::HOVER && state_ != State::CRUISE) return;
+  pos_sp_        = p;
+  pos_sp_yaw_    = yaw;
+  pos_sp_valid_  = true;
+  setpoint_type_ = 0;   // POSITION
+}
+
+bool FlightController::is_transitioning() const
+{
+  return (state_ == State::HOVER  && mode_ == static_cast<uint8_t>(FlightMode::CRUISE)) ||
+         (state_ == State::CRUISE && mode_ == static_cast<uint8_t>(FlightMode::HOVER));
 }
 
 void FlightController::on_vel_setpoint(VelNED v, double now_s)
 {
-  if (state_ != State::HOVER) return;
-  vel_sp_       = v;
-  vel_sp_t_     = now_s;
-  vel_sp_valid_ = true;
+  if (state_ != State::HOVER) return;   // velocity setpoints only apply in MC hover
+  vel_sp_        = v;
+  vel_sp_t_      = now_s;
+  vel_sp_valid_  = true;
+  setpoint_type_ = 1;   // VELOCITY
 }
 
 bool FlightController::is_vel_sp_active(double now_s) const
 {
-  return vel_sp_valid_ && (now_s - vel_sp_t_) < VEL_SP_TIMEOUT_S;
+  // Velocity wins only if the last setpoint was a velocity AND it is still fresh
+  // (fails safe to position/hover if the velocity publisher dies).
+  return setpoint_type_ == 1 && (now_s - vel_sp_t_) < VEL_SP_TIMEOUT_S;
 }
 
 bool FlightController::takeoff_reached() const
@@ -43,7 +53,7 @@ bool FlightController::set_state(State s)
 
 bool FlightController::airborne() const
 {
-  return state_ == State::TAKEOFF || state_ == State::HOVER;
+  return state_ == State::TAKEOFF || state_ == State::HOVER || state_ == State::CRUISE;
 }
 
 bool FlightController::hard_breach(PosNED p) const
@@ -120,6 +130,14 @@ FlightController::Tick FlightController::tick(double now_s)
       out.send_land     = true;
       out.state_changed = set_state(State::LANDING) || out.state_changed;
     }
+    else if (state_ == State::CRUISE) {
+      // Can't land a fixed wing in place: transition to MC first, then land on the
+      // next tick. Reset mode_ too so is_transitioning() below doesn't re-fire.
+      out.send_mode_transition = true;
+      mode_ = static_cast<uint8_t>(FlightMode::HOVER);
+      out.state_changed = set_state(State::HOVER) || out.state_changed;
+      land_requested_ = true;  // re-queue the land request for the next tick (now in hover)
+    }
   }
 
   // Hard geofence: if the vehicle leaves the box (+ margin) while airborne,
@@ -130,6 +148,12 @@ FlightController::Tick FlightController::tick(double now_s)
       out.send_land     = true;
       out.state_changed = set_state(State::LANDING) || out.state_changed;
     }
+  }
+
+  if (is_transitioning()) {
+    out.send_mode_transition = true;
+    out.state_changed = set_state((state_ == State::HOVER) ? State::CRUISE : State::HOVER)
+                        || out.state_changed;
   }
 
   // State transitions driven by vehicle telemetry.
@@ -177,6 +201,22 @@ FlightController::Tick FlightController::tick(double now_s)
         out.yaw           = hover_yaw_;
       }
       break;
+    case State::CRUISE:
+      out.publish_setpoint = true;
+      // In cruise mode, we only accept position setpoints.
+      if (pos_sp_valid_) {
+        out.setpoint_kind = Tick::SP::POSITION;
+        out.position      = pos_sp_;
+        out.yaw           = pos_sp_yaw_;
+        hover_     = pos_sp_;
+        hover_yaw_ = pos_sp_yaw_;
+      } else {
+        out.setpoint_kind = Tick::SP::POSITION;
+        out.position      = hover_;
+        out.yaw           = hover_yaw_;
+      }
+      break;
+
 
     case State::LANDING:
     case State::LANDED:
@@ -203,6 +243,7 @@ const char * FlightController::state_str(State s)
   switch (s) {
     case State::TAKEOFF: return "TAKEOFF";
     case State::HOVER:   return "HOVER";
+    case State::CRUISE:  return "CRUISE";
     case State::LANDING: return "LANDING";
     case State::LANDED:  return "LANDED";
   }

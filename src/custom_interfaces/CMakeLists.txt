@@ -9,6 +9,7 @@ find_package(builtin_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Waypoints.msg"
   "msg/OffboardStatus.msg"
+  "msg/ModeSetpoint.msg"
   DEPENDENCIES geometry_msgs builtin_interfaces
 )
 

@@ -1,12 +1,13 @@
-# main_control — `minimal_control` branch
+# main_control — `feat/vtol-fw-modes` branch
 
-A **minimal, MC-only** ROS2 + PX4 offboard control template. Forked from
-the full multi-vehicle codebase on `main` and stripped down to be easy to
-read, debug, and extend.
+A ROS2 + PX4 offboard control template for a **VTOL / fixed-wing-capable**
+multicopter. Extends the `feat/offboard-state-geofence` branch (MC + geofence
++ state feedback) with a **fixed-wing cruise mode**: external setpoints now
+carry a *flight mode*, and the controller commands the PX4 VTOL transition
+between multicopter **hover** and fixed-wing **cruise**.
 
-If you want the full MC/FW/VTOL version with mode-switching, see the `main`
-branch. If you want a clean starting point for a multicopter offboard
-project — you're in the right place.
+For the plain MC template see `minimal_control`; for MC + geofence without any
+FW code see `feat/offboard-state-geofence`.
 
 ---
 
@@ -14,23 +15,22 @@ project — you're in the right place.
 
 | Package | Role |
 |---|---|
-| `src/basic_offboard/` | The control nodes — flight state machine + mission state machine |
-| `src/custom_interfaces/` | Project-specific ROS messages (`Waypoints.msg`) |
+| `src/basic_offboard/` | Control nodes — flight state machine + mission state machine |
+| `src/custom_interfaces/` | Project messages: `Waypoints`, `OffboardStatus`, **`ModeSetpoint`** |
 | `src/px4_msgs/` | Upstream PX4 ROS2 message definitions (submodule, do not edit) |
 | `src/px4_ros_com/` | Upstream PX4↔ROS2 bridge utilities (submodule, do not edit) |
 
-The interesting code is in `basic_offboard/`. See
-[`src/basic_offboard/ARCHITECTURE.md`](src/basic_offboard/ARCHITECTURE.md)
-for the full design walkthrough and rationale.
+See [`src/basic_offboard/ARCHITECTURE.md`](src/basic_offboard/ARCHITECTURE.md)
+for the full design walkthrough.
 
 ---
 
 ## Architecture in one sentence
 
 ROS2 nodes are **thin transport shells** around two pure-C++ classes
-(`FlightController`, `MissionPlanner`) that own all decision logic and
-have zero dependency on `rclcpp` or `px4_msgs` — so logic is unit-testable
-in <10 ms without launching PX4.
+(`FlightController`, `MissionPlanner`) that own all decision logic and have
+zero dependency on `rclcpp` or `px4_msgs` — so the logic is unit-testable in
+milliseconds without launching PX4.
 
 ```
 ROS2 (offboard_master.cpp, mission_node.cpp)      ← pub/sub, timer, logging
@@ -40,50 +40,80 @@ Pure logic (FlightController, MissionPlanner)     ← state machines, decisions
 
 ---
 
-## Quick start
+## Flight state machine
 
-**Prerequisites:** ROS2 Humble, PX4 SITL + uXRCE-DDS agent (or real hardware
-with the bridge configured).
-
-```bash
-# 1. Build
-source /opt/ros/humble/setup.bash
-cd /home/porh/px4_dev/main_control
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=RELWITHDEBINFO --symlink-install
-source install/setup.bash
-
-# 2. Start PX4 SITL + the DDS agent (in separate terminals, per your existing setup)
-
-# 3a. Run the flight controller alone (manual setpoint driving)
-ros2 run basic_offboard offboard_master
-
-# 3b. OR run the full launch with mission state machine
-ros2 launch basic_offboard mission_launch.py            # default 3 endurance laps
-ros2 launch basic_offboard mission_launch.py desired_laps:=1
-
-# 4. (Optional) Mock waypoint provider for sim
-ros2 run basic_offboard waypoint_test_node
 ```
+TAKEOFF ──► HOVER ◄────► CRUISE ──► LANDING ──► LANDED
+             (MC)  mode   (FW)
+```
+
+- **TAKEOFF** — always multicopter; climbs to the takeoff altitude, then HOVER.
+- **HOVER** — multicopter. Accepts position *and* velocity setpoints.
+- **CRUISE** — fixed-wing. Accepts **position setpoints only** (PX4 ignores
+  velocity/acceleration for FW; the vehicle loiters around the position).
+- **HOVER ↔ CRUISE** — driven by the requested mode; the shell issues
+  `VEHICLE_CMD_DO_VTOL_TRANSITION` (`param1=4` FW / `3` MC).
+- **LANDING** — a land request in CRUISE first transitions back to MC, then lands.
+
+State, mode, and geofence verdict are published on **`/offboard/state`**
+(`custom_interfaces/OffboardStatus`, latched) so external nodes can sequence
+safely.
 
 ---
 
 ## Driving the drone by topic
 
-After takeoff completes automatically (climb to 5 m AGL), the drone enters
-`HOVER` and accepts external setpoints. All coordinates are **NED**
-(x=North, y=East, z=Down, z<0 above ground).
+After takeoff the drone enters `HOVER` and accepts setpoints. All coordinates
+are **NED** (x=North, y=East, z=Down, z<0 above ground).
 
 ```bash
-# Fly to a point
-ros2 topic pub --once /offboard/setpoint/position geometry_msgs/PoseStamped \
-  '{pose: {position: {x: 2.0, y: 0.0, z: -5.0}}}'
+# Mode-carrying setpoint: hover (MC) + position
+ros2 topic pub --once /offboard/setpoint/mode custom_interfaces/msg/ModeSetpoint \
+  '{mode: 0, type: 0, position: {x: 2.0, y: 0.0, z: -5.0}}'
 
-# Continuous velocity (republish at >= 2 Hz or it expires)
-ros2 topic pub --rate 10 /offboard/setpoint/velocity geometry_msgs/TwistStamped \
-  '{twist: {linear: {x: 1.0}}}'
+# Switch to fixed-wing cruise, fly toward a position (loiters around it)
+ros2 topic pub --once /offboard/setpoint/mode custom_interfaces/msg/ModeSetpoint \
+  '{mode: 1, type: 0, position: {x: 60.0, y: 0.0, z: -40.0}}'
 
-# Land
+# Back to multicopter hover
+ros2 topic pub --once /offboard/setpoint/mode custom_interfaces/msg/ModeSetpoint \
+  '{mode: 0, type: 0, position: {x: 0.0, y: 0.0, z: -5.0}}'
+
+# Land (from cruise this auto-transitions to MC first)
 ros2 topic pub --once /offboard/cmd/land std_msgs/Bool '{data: true}'
+```
+
+`ModeSetpoint`: `mode` (0 hover / 1 cruise), `type` (0 position / 1 velocity),
+`position`+`yaw`, `velocity`+`yawspeed`. The legacy MC-only
+`/offboard/setpoint/position` and `/offboard/setpoint/velocity` topics still
+work for hover.
+
+---
+
+## Geofence
+
+An axis-aligned NED box, enforced in the pure core, configured via `fence.*`
+params on `offboard_master`:
+- **Soft** — setpoints are clamped inside the box → `GEOFENCE_WARN`.
+- **Hard** — the vehicle leaving the box + margin (in TAKEOFF/HOVER/CRUISE)
+  forces an autonomous landing → `GEOFENCE_BREACH`.
+
+---
+
+## Build & run
+
+```bash
+source /opt/ros/humble/setup.bash
+cd /home/porh/px4_dev/main_control
+colcon build --packages-select custom_interfaces basic_offboard \
+  --cmake-args -DCMAKE_BUILD_TYPE=RELWITHDEBINFO --symlink-install
+source install/setup.bash
+
+# Flight controller alone (drive it with the topics above)
+ros2 run basic_offboard offboard_master
+
+# OR the mission state machine (needs PX4 SITL + uXRCE-DDS agent running)
+ros2 launch basic_offboard mission_launch.py            # default 3 endurance laps
 ```
 
 ---
@@ -95,8 +125,9 @@ colcon test --packages-select basic_offboard
 colcon test-result --verbose
 ```
 
-19 unit tests covering the flight + mission state machines. They do not
-require PX4, the DDS bridge, or even a running ROS daemon.
+27 unit tests (18 flight + 9 mission) run without PX4, the DDS bridge, or a ROS
+daemon. Note: the HOVER↔CRUISE and land-from-cruise paths are implemented but
+not yet covered by dedicated tests — add them before relying on FW flight.
 
 To step through the logic in a debugger without ROS:
 
@@ -106,21 +137,8 @@ gdb --args build/basic_offboard/test_flight_controller --gtest_filter=*Land*
 
 ---
 
-## Where to go next
+## Related branches
 
-- **Modify behavior** → `src/basic_offboard/include/basic_offboard/flight_controller.hpp`
-  and the matching `.cpp`. The ROS shell shouldn't need changes for most logic edits.
-- **Add a new mission** → `mission_planner.{hpp,cpp}`.
-- **Add a new module** (e.g. velocity limiter, geofence) → create a new `.hpp/.cpp`
-  pair in `basic_offboard/`, add it as a library in `CMakeLists.txt`, link it
-  to the consuming node.
-- **Understand the design choices** → [`src/basic_offboard/ARCHITECTURE.md`](src/basic_offboard/ARCHITECTURE.md)
-  has a "why" paragraph for every non-obvious decision.
-
----
-
-## Branch policy
-
-- **`main`** — full MC/FW/VTOL implementation with mode-switching service.
-- **`minimal_control`** (this branch) — MC-only template. Treat as a clean
-  starting point; copy and rename for new projects.
+- **`minimal_control`** — MC-only template, no geofence/state/VTOL.
+- **`feat/offboard-state-geofence`** — MC + geofence + `/offboard/state` (this branch's parent).
+- **`feat/vtol-logic`** — an earlier, standalone VTOL experiment (different approach).
