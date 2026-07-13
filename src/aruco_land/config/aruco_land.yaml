@@ -1,0 +1,29 @@
+aruco_land_node:
+  ros__parameters:
+    # Altitudes are PX4 NED (negative = up). Defaults sit INSIDE offboard_master's
+    # default geofence box [z_ceiling = -3.0, z_floor = -0.2] — keep them
+    # consistent with whatever fence.* offboard_master is launched with.
+    search_alt: -2.5          # spiral search altitude
+    approach_alt: -2.0        # approach altitude over the marker
+    land_trigger_alt: -0.8    # request NAV_LAND once drone.z > this (near ground)
+
+    descent_vel: -0.4         # descent-rate factor (original semantics)
+
+    # PI horizontal centering over the marker (descend phase).
+    vel_p_gain: 1.2
+    vel_i_gain: 0.0
+    max_velocity: 1.0
+
+    target_timeout: 1.0       # s; target considered lost after this gap
+    delta_position: 0.4       # m; approach -> descend horizontal threshold
+    wp_accept: 0.3            # m; spiral waypoint advance radius
+
+    # Spiral search geometry.
+    spiral_points: 20
+    spiral_r_step: 0.1
+    spiral_angle_step: 0.5
+
+    # Camera mount offset in base_link (m), used in the optical->NED transform.
+    camera_offset_x: 0.0
+    camera_offset_y: 0.0
+    camera_offset_z: -0.1
