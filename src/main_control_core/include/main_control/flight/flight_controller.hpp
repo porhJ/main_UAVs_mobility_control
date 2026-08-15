@@ -13,6 +13,8 @@
 
 #include <cstdint>
 
+#include "main_control/model/types.hpp"
+
 namespace basic_offboard {
 
 class FlightController {
@@ -23,8 +25,8 @@ public:
   // Mirrors custom_interfaces/msg/OffboardStatus geofence constants.
   enum GeofenceStatus : uint8_t { GEOFENCE_OK = 0, GEOFENCE_WARN = 1, GEOFENCE_BREACH = 2 };
 
-  struct PosNED { float x{0.0f}, y{0.0f}, z{0.0f}; };
-  struct VelNED { float vx{0.0f}, vy{0.0f}, vz{0.0f}, yawspeed{0.0f}; };
+  using PosNED = main_control::model::PositionNed;
+  using VelNED = main_control::model::VelocityNed;
 
   // Tunables (exposed for tests)
   static constexpr float  TAKEOFF_Z_NED    = -5.0f;
@@ -136,3 +138,9 @@ private:
 };
 
 }  // namespace basic_offboard
+
+namespace main_control::flight {
+
+using FlightController = ::basic_offboard::FlightController;
+
+}  // namespace main_control::flight

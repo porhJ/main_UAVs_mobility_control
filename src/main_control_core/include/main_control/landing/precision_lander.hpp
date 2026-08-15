@@ -22,13 +22,15 @@
 #include <cstdint>
 #include <vector>
 
+#include "main_control/model/types.hpp"
+
 namespace aruco_land {
 
 class PrecisionLander {
 public:
   enum class State { IDLE, SEARCH, APPROACH, DESCEND, FINISHED };
 
-  struct Vec3 { float x{0.0f}, y{0.0f}, z{0.0f}; };
+  using Vec3 = main_control::model::PositionNed;
 
   // Runtime configuration (injected by the shell from ROS params).
   // Altitude defaults sit inside offboard_master's default fence box
@@ -104,3 +106,9 @@ private:
 };
 
 }  // namespace aruco_land
+
+namespace main_control::landing {
+
+using PrecisionLander = ::aruco_land::PrecisionLander;
+
+}  // namespace main_control::landing

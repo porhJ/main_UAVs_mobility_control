@@ -69,10 +69,9 @@ That mixing has four practical costs:
    stays simple and the user wants quick iteration) would mean rewriting
    the whole thing instead of just the shell.
 
-The split fixes all four. The pure layer is plain C++ that depends only on
-`<cstdint>`, `<vector>`, `<cmath>`. You can `g++ flight_controller.cpp
-test_flight_controller.cpp -lgtest` outside the ROS workspace if you want.
-The full test suite runs in **under 10 ms**.
+The split fixes all four. The pure layer is a separately installable C++17
+package that depends only on the standard library. It configures, builds, and
+tests without sourcing ROS. The full test suite runs in **under 10 ms**.
 
 ### Why C++ and not Python
 
@@ -93,23 +92,27 @@ classes map 1:1 to dataclasses + methods.
 ## File map
 
 ```
-src/basic_offboard/
-├── include/basic_offboard/
-│   ├── flight_controller.hpp    # Pure logic — flight state machine
-│   └── mission_planner.hpp      # Pure logic — mission state machine
-├── src/
-│   ├── flight_controller.cpp    # Impl
-│   ├── mission_planner.cpp      # Impl
-│   ├── offboard_master.cpp      # ROS shell over FlightController
-│   ├── mission_node.cpp         # ROS shell over MissionPlanner
-│   └── waypoint_test_node.cpp   # Mock waypoint publisher (sim/dev only)
-├── test/
-│   ├── test_flight_controller.cpp
-│   └── test_mission_planner.cpp
-├── launch/mission_launch.py
-├── CMakeLists.txt
-└── package.xml
+src/
+├── main_control_core/            # Generic CMake; no ROS dependency
+│   ├── include/main_control/
+│   │   ├── model/types.hpp
+│   │   ├── flight/flight_controller.hpp
+│   │   ├── mission/mission_planner.hpp
+│   │   └── landing/precision_lander.hpp
+│   ├── src/{flight,mission,landing}/
+│   └── test/{flight,mission,landing}/
+├── main_control_apps/            # Standalone non-ROS executables
+└── basic_offboard/               # ament package; transport adapters only
+    ├── src/offboard_master.cpp
+    ├── src/mission_node.cpp
+    ├── src/waypoint_test_node.cpp
+    └── launch/mission_launch.py
 ```
+
+The core exports `main_control::model`, `main_control::flight`,
+`main_control::mission`, and `main_control::landing`. Standalone executables
+should consume those targets through `find_package(main_control_core CONFIG
+REQUIRED)` rather than being added to a ROS adapter package.
 
 ---
 

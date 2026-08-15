@@ -6,14 +6,14 @@
 #include <std_msgs/msg/u_int8.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 
-#include "basic_offboard/mission_planner.hpp"
+#include "main_control/mission/mission_planner.hpp"
 #include "custom_interfaces/msg/waypoints.hpp"
 #include "custom_interfaces/msg/offboard_status.hpp"
 
 // Thin ROS shell. All mission logic lives in basic_offboard::MissionPlanner.
 
 using namespace std::chrono_literals;
-using basic_offboard::MissionPlanner;
+using main_control::mission::MissionPlanner;
 
 class MissionNode : public rclcpp::Node
 {

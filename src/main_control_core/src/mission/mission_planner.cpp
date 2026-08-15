@@ -1,4 +1,4 @@
-#include "basic_offboard/mission_planner.hpp"
+#include "main_control/mission/mission_planner.hpp"
 
 #include <cmath>
 

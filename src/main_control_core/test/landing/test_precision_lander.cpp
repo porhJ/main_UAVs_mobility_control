@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "aruco_land/precision_lander.hpp"
+#include "main_control/landing/precision_lander.hpp"
 
-using aruco_land::PrecisionLander;
+using main_control::landing::PrecisionLander;
 using State = PrecisionLander::State;
 using Vec3  = PrecisionLander::Vec3;
 

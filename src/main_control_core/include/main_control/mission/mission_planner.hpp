@@ -11,13 +11,15 @@
 #include <cstdint>
 #include <vector>
 
+#include "main_control/model/types.hpp"
+
 namespace basic_offboard {
 
 class MissionPlanner {
 public:
   enum class Mission : uint8_t { ENDURANCE = 0, MAPPING = 1, DROPPING = 2 };
 
-  struct Waypoint { float x{0.0f}, y{0.0f}, z{0.0f}, yaw{0.0f}; };
+  using Waypoint = main_control::model::PoseNed;
 
   struct Tick {
     bool     has_setpoint{false};
@@ -65,3 +67,9 @@ private:
 };
 
 }  // namespace basic_offboard
+
+namespace main_control::mission {
+
+using MissionPlanner = ::basic_offboard::MissionPlanner;
+
+}  // namespace main_control::mission

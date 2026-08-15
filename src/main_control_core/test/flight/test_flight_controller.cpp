@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "basic_offboard/flight_controller.hpp"
+#include "main_control/flight/flight_controller.hpp"
 
-using basic_offboard::FlightController;
+using main_control::flight::FlightController;
 using State = FlightController::State;
 using SP    = FlightController::Tick::SP;
 

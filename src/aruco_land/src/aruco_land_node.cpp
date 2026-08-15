@@ -10,7 +10,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
-#include "aruco_land/precision_lander.hpp"
+#include "main_control/landing/precision_lander.hpp"
 
 // Thin ROS shell. All decision logic lives in aruco_land::PrecisionLander.
 // This node only converts between ROS/PX4 messages and the brain's plain
@@ -23,7 +23,7 @@
 // carries only position.)
 
 using namespace std::chrono_literals;
-using aruco_land::PrecisionLander;
+using main_control::landing::PrecisionLander;
 
 class ArucoLandNode : public rclcpp::Node
 {

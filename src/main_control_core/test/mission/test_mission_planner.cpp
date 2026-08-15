@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 
-#include "basic_offboard/mission_planner.hpp"
+#include "main_control/mission/mission_planner.hpp"
 
-using basic_offboard::MissionPlanner;
+using main_control::mission::MissionPlanner;
 using Mission  = MissionPlanner::Mission;
 using Waypoint = MissionPlanner::Waypoint;
 

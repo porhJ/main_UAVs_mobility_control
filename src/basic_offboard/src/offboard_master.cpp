@@ -13,14 +13,14 @@
 #include <custom_interfaces/msg/offboard_status.hpp>
 #include <custom_interfaces/msg/mode_setpoint.hpp>
 
-#include "basic_offboard/flight_controller.hpp"
+#include "main_control/flight/flight_controller.hpp"
 
 // Thin ROS shell. All decision logic lives in basic_offboard::FlightController.
 // This node only translates between ROS topics and the controller API,
 // and publishes whatever the controller's tick() asks for.
 
 using namespace std::chrono_literals;
-using basic_offboard::FlightController;
+using main_control::flight::FlightController;
 
 class OffboardMaster : public rclcpp::Node
 {
