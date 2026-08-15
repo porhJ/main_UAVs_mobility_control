@@ -116,11 +116,12 @@ PrecisionLander::Tick PrecisionLander::tick(double now_s)
       }
       float vx = 0.0f, vy = 0.0f;
       compute_centering_vel(vx, vy);
+      float vz = cfg_.p_gain * drone_pos_.z;  // simple P control to approach_alt
 
       out.has_setpoint = true;
       out.position     = {drone_pos_.x + vx * dt,
                           drone_pos_.y + vy * dt,
-                          drone_pos_.z - cfg_.descent_vel * dt};
+                          drone_pos_.z - vz * dt};
       out.yaw          = drone_yaw_;
 
       if (drone_pos_.z > cfg_.land_trigger_alt) {  // close enough to the ground
