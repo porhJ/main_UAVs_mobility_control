@@ -15,7 +15,10 @@ FW code see `feat/offboard-state-geofence`.
 
 | Package | Role |
 |---|---|
-| `src/basic_offboard/` | Control nodes — flight state machine + mission state machine |
+| `src/main_control_core/` | Standalone C++17 libraries — model, flight, mission, and landing logic |
+| `src/main_control_apps/` | Standalone non-ROS executables that consume the core libraries |
+| `src/basic_offboard/` | ROS adapters for flight and mission control |
+| `src/aruco_land/` | ROS adapter for precision landing |
 | `src/custom_interfaces/` | Project messages: `Waypoints`, `OffboardStatus`, **`ModeSetpoint`** |
 | `src/px4_msgs/` | Upstream PX4 ROS2 message definitions (submodule, do not edit) |
 | `src/px4_ros_com/` | Upstream PX4↔ROS2 bridge utilities (submodule, do not edit) |
@@ -27,15 +30,14 @@ for the full design walkthrough.
 
 ## Architecture in one sentence
 
-ROS2 nodes are **thin transport shells** around two pure-C++ classes
-(`FlightController`, `MissionPlanner`) that own all decision logic and have
-zero dependency on `rclcpp` or `px4_msgs` — so the logic is unit-testable in
-milliseconds without launching PX4.
+ROS2 nodes are **thin transport shells** around standalone C++ libraries
+(`FlightController`, `MissionPlanner`, and `PrecisionLander`) that own all
+decision logic and have zero dependency on `rclcpp` or `px4_msgs`.
 
 ```
 ROS2 (offboard_master.cpp, mission_node.cpp)      ← pub/sub, timer, logging
   ↓ on_*(...)   ↑ tick() returns a Tick struct
-Pure logic (FlightController, MissionPlanner)     ← state machines, decisions
+main_control_core                               ← state machines, domain types
 ```
 
 ---
@@ -105,7 +107,7 @@ params on `offboard_master`:
 ```bash
 source /opt/ros/humble/setup.bash
 cd /home/porh/px4_dev/main_control
-colcon build --packages-select custom_interfaces basic_offboard \
+colcon build --packages-up-to basic_offboard aruco_land \
   --cmake-args -DCMAKE_BUILD_TYPE=RELWITHDEBINFO --symlink-install
 source install/setup.bash
 
@@ -121,18 +123,25 @@ ros2 launch basic_offboard mission_launch.py            # default 3 endurance la
 ## Testing
 
 ```bash
-colcon test --packages-select basic_offboard
-colcon test-result --verbose
+# Standalone core build: no ROS environment required.
+cmake -S src/main_control_core -B build/core-standalone \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/core-standalone
+ctest --test-dir build/core-standalone --output-on-failure
+
+# Or build and test the same generic-CMake package through colcon.
+colcon build --packages-select main_control_core
+colcon test --packages-select main_control_core
 ```
 
-27 unit tests (18 flight + 9 mission) run without PX4, the DDS bridge, or a ROS
-daemon. Note: the HOVER↔CRUISE and land-from-cruise paths are implemented but
-not yet covered by dedicated tests — add them before relying on FW flight.
+35 unit tests (18 flight + 9 mission + 8 precision landing) run without PX4,
+the DDS bridge, or a ROS daemon. A separate boundary test rejects ROS message
+or `rclcpp` includes from the core package.
 
 To step through the logic in a debugger without ROS:
 
 ```bash
-gdb --args build/basic_offboard/test_flight_controller --gtest_filter=*Land*
+gdb --args build/main_control_core/test_flight_controller --gtest_filter=*Land*
 ```
 
 ---
